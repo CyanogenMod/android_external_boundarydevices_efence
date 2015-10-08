@@ -13,23 +13,24 @@
 #include <stdio.h>
 
 #if defined(ANDROID)
-#include <private/logd.h>
+#include <dlfcn.h>
+#include <private/libc_logging.h>
 #include <unwind.h>
 
 
-#define debug_log(format, ...)  \
-    __libc_android_log_print(ANDROID_LOG_DEBUG, "EFence", (format), ##__VA_ARGS__ )
-#define error_log(format, ...)  \
-    __libc_android_log_print(ANDROID_LOG_ERROR, "EFence", (format), ##__VA_ARGS__ )
+#define debug_log(format, ...)	\
+	__libc_format_log(ANDROID_LOG_DEBUG, "EFence", (format), ##__VA_ARGS__ )
+#define error_log(format, ...)	\
+	__libc_format_log(ANDROID_LOG_ERROR, "EFence", (format), ##__VA_ARGS__ )
 #define info_log(format, ...)  \
-    __libc_android_log_print(ANDROID_LOG_INFO, "EFence", (format), ##__VA_ARGS__ )
+	__libc_format_log(ANDROID_LOG_INFO, "EFence", (format), ##__VA_ARGS__ )
 
 #define debug_vlog(format, args)  \
-    __libc_android_log_vprint(ANDROID_LOG_DEBUG, "EFence", (format), (args) )
+	__libc_format_log_va_list(ANDROID_LOG_DEBUG, "EFence", (format), (args) )
 #define error_vlog(format, args)  \
-    __libc_android_log_vprint(ANDROID_LOG_ERROR, "EFence", (format), (args) )
+	__libc_format_log_va_list(ANDROID_LOG_ERROR, "EFence", (format), (args) )
 #define info_vlog(format, args)  \
-    __libc_android_log_vprint(ANDROID_LOG_INFO, "EFence", (format), (args) )
+	__libc_format_log_va_list(ANDROID_LOG_INFO, "EFence", (format), (args) )
 
 
 // =============================================================================
@@ -39,8 +40,8 @@
 
 typedef struct
 {
-    size_t count;
-    intptr_t* addrs;
+	size_t count;
+	intptr_t* addrs;
 } stack_crawl_state_t;
 
 
@@ -53,47 +54,38 @@ typedef _Unwind_Context __unwind_context;
 
 static _Unwind_Reason_Code trace_function(__unwind_context *context, void *arg)
 {
-    stack_crawl_state_t* state = (stack_crawl_state_t*)arg;
-    if (state->count) {
-        intptr_t ip = (intptr_t)_Unwind_GetIP(context);
-        if (ip) {
-            state->addrs[0] = ip;
-            state->addrs++;
-            state->count--;
-            return _URC_NO_REASON;
-        }
-    }
-    /*
-     * If we run out of space to record the address or 0 has been seen, stop
-     * unwinding the stack.
-     */
-    return _URC_END_OF_STACK;
+	void* ip = (void*)_Unwind_GetIP(context);
+	const char* symbol = "<unknown>";
+	int offset = 0;
+	Dl_info info;
+
+	(void)arg;
+	memset(&info, 0, sizeof(info));
+	if (dladdr(ip, &info) != 0) {
+		symbol = info.dli_sname;
+		if (info.dli_saddr != NULL) {
+			offset = (int)((char*)ip - (char*)info.dli_saddr);
+		}
+	}
+
+	__libc_format_log(ANDROID_LOG_ERROR, "EFence","%p %s (%s+%d)\n",
+		ip, info.dli_fname ? info.dli_fname : "??", symbol, offset);
+
+	return _URC_NO_REASON;
 }
 
 static inline
-int get_backtrace(intptr_t* addrs, size_t max_entries)
+void get_backtrace()
 {
-    stack_crawl_state_t state;
-    state.count = max_entries;
-    state.addrs = (intptr_t*)addrs;
-    _Unwind_Backtrace(trace_function, (void*)&state);
-    return max_entries - state.count;
+	__libc_format_log(ANDROID_LOG_ERROR, "EFence","stack trace: \n");
+	_Unwind_Backtrace(trace_function, NULL);
 }
 
 static void dump_stack_trace()
 {
-    intptr_t addrs[20];
-    int c = get_backtrace(addrs, 20);
-    char buf[16];
-    char tmp[16*20];
-    int i;
+	char tmp[16*20];
 
-    tmp[0] = 0; // Need to initialize tmp[0] for the first strcat
-    for (i=0 ; i<c; i++) {
-        snprintf(buf, sizeof buf, "%2d: %08x\n", i, addrs[i]);
-        strlcat(tmp, buf, sizeof tmp);
-    }
-    __libc_android_log_print(ANDROID_LOG_ERROR, "EFence", "call stack:\n%s", tmp);
+	get_backtrace();
 
 	/* Printk process's maps */
 	sprintf(&tmp[0], "/system/bin/logwrapper /system/bin/toolbox cat /proc/%d/maps", getpid());
