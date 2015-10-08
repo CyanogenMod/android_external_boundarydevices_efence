@@ -1,7 +1,7 @@
 /*
  * Electric Fence - Red-Zone memory allocator.
  * Bruce Perens, 1988, 1993
- * 
+ *
  * This is a special version of malloc() and company for debugging software
  * that is suspected of overrunning or underrunning the boundaries of a
  * malloc buffer, or touching free memory.
@@ -31,7 +31,7 @@
  */
 
 /*
-* 2012-5-31 PIONEER CORPORATION 
+* 2012-5-31 PIONEER CORPORATION
 *
 * Modify this file for ANDROID.
 *
@@ -43,11 +43,20 @@
 #include <memory.h>
 #include <string.h>
 #ifdef USE_SEMAPHORE
-# include <pthread.h>
-# include <semaphore.h>
+#include <pthread.h>
+#include <semaphore.h>
 #endif
 #if defined(ANDROID)
-# include <sys/system_properties.h>
+#define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
+#include <sys/_system_properties.h>
+
+
+typedef struct HashEntry HashEntry;
+typedef struct HashTable HashTable;
+typedef struct MallocDebug MallocDebug;
+#include <stdbool.h>
+#include <bionic/malloc_debug_common.h>
+
 #endif
 
 #ifdef	malloc
@@ -132,7 +141,7 @@ int		EF_PROTECT_BELOW = -1;
  * EF_ALLOW_MALLOC_0 is set if Electric Fence is to allow malloc(0). I
  * trap malloc(0) by default because it is a common source of bugs.
  */
-int		EF_ALLOW_MALLOC_0 = -1;
+int		EF_ALLOW_MALLOC_0 = 1; /* default allow malloc 0 */
 
 /*
  * EF_FILL is set to 0-255 if Electric Fence should fill all new allocated
@@ -209,6 +218,13 @@ static int        semDepth = 0;
  */
 static size_t		bytesPerPage = 0;
 
+__LIBC_HIDDEN__ HashTable* g_hash_table;
+__LIBC_HIDDEN__ const MallocDebug* g_malloc_dispatch;
+
+#if defined(ANDROID)
+void* efence_memalign(size_t alignment, size_t userSize);
+#endif
+
 static void
 lock()
 {
@@ -282,7 +298,9 @@ initialize(void)
 	char *	string;
 	Slot *	slot;
 #if defined(ANDROID)
-    char	prop[PROP_VALUE_MAX];
+	char	prop[PROP_VALUE_MAX];
+
+	__system_properties_init();
 #endif
 
 	/*EF_Print(version);*/
@@ -375,24 +393,13 @@ initialize(void)
 	/*
 	 * See if the user wants to allow malloc(0).
 	 */
-	if ( EF_ALLOW_MALLOC_0 == -1 ) {
-		if ( (string = getenv("EF_ALLOW_MALLOC_0")) != 0 )
-			EF_ALLOW_MALLOC_0 = (atoi(string) != 0);
+	if ( (string = getenv("EF_ALLOW_MALLOC_0")) != 0 )
+		EF_ALLOW_MALLOC_0 = (atoi(string) != 0);
 #if defined(ANDROID)
-		else {
-			if (__system_property_get("ef.allow.malloc.0", prop)) {
-				EF_ALLOW_MALLOC_0 = (atoi(prop) != 0);
-			} else {
-				EF_ALLOW_MALLOC_0 = 0;
-			}
-		}
-#else
-		else
-			EF_ALLOW_MALLOC_0 = 0;
+	else if (__system_property_get("ef.allow.malloc.0", prop))
+		EF_ALLOW_MALLOC_0 = (atoi(prop) != 0);
 #endif
-	}
 
-	
 	/*
 	 * Check if we should be filling new memory with a value.
 	 */
@@ -410,7 +417,7 @@ initialize(void)
 
 	/*
 	 * Get the run-time configuration of the virtual memory page size.
- 	 */
+	 */
 	bytesPerPage = Page_Size();
 
 	/*
@@ -461,14 +468,39 @@ initialize(void)
 #if defined(ANDROID) && defined(DYNAMIC_LIB)
 __attribute__((visibility("default")))
 extern C_LINKAGE int
-malloc_debug_initialize(void)
-{
+malloc_debug_initialize(HashTable* hash_table, const MallocDebug* malloc_dispatch) {
+	g_hash_table = hash_table;
+	g_malloc_dispatch = malloc_dispatch;
+
 	initialize();
 
-	return 0;
+	return 1;
+}
+
+__attribute__((visibility("default")))
+extern C_LINKAGE struct mallinfo
+efence_mallinfo() {
+  return g_malloc_dispatch->mallinfo();
+}
+
+__attribute__((visibility("default")))
+extern C_LINKAGE size_t
+efence_malloc_usable_size(const void* mem) {
+	return g_malloc_dispatch->malloc_usable_size(mem);
+}
+
+__attribute__((visibility("default")))
+extern C_LINKAGE int
+efence_posix_memalign(void** memptr, size_t alignment, size_t size) {
+	return g_malloc_dispatch->posix_memalign(memptr, alignment, size);
+}
+
+__attribute__((visibility("default")))
+extern C_LINKAGE void*
+efence_pvalloc(size_t bytes) {
+  return g_malloc_dispatch->pvalloc(bytes);
 }
 #endif
-
 /*
  * allocateMoreSlots is called when there are only enough slot structures
  * left to support the allocation of a single malloc buffer.
@@ -484,9 +516,13 @@ allocateMoreSlots(void)
 	noAllocationListProtection = 1;
 	internalUse = 1;
 
+#if defined(ANDROID)
+	newAllocation = efence_memalign(EF_ALIGNMENT, newSize);
+#else
 	newAllocation = malloc(newSize);
-	memcpy(newAllocation, allocationList, allocationListSize);
+#endif
 	memset(&(((char *)newAllocation)[allocationListSize]), 0, bytesPerPage);
+	memcpy(newAllocation, allocationList, allocationListSize);
 
 	allocationList = (Slot *)newAllocation;
 	allocationListSize = newSize;
@@ -498,7 +534,7 @@ allocateMoreSlots(void)
 	/*
 	 * Keep access to the allocation list open at this point, because
 	 * I am returning to memalign(), which needs that access.
- 	 */
+	 */
 	noAllocationListProtection = 0;
 	internalUse = 0;
 }
@@ -519,11 +555,11 @@ allocateMoreSlots(void)
  * functions on Sun systems, which do word references to the string memory
  * and may refer to memory up to three bytes beyond the end of the string.
  * For this reason, I take the alignment requests to memalign() and valloc()
- * seriously, and 
- * 
+ * seriously, and
+ *
  * Electric Fence wastes lots of memory. I do a best-fit allocator here
  * so that it won't waste even more. It's slow, but thrashing because your
- * working set is too big for a system's RAM is even slower. 
+ * working set is too big for a system's RAM is even slower.
  */
 #if defined(ANDROID) && defined(DYNAMIC_LIB)
 __attribute__((visibility("default")))
@@ -553,7 +589,7 @@ memalign(size_t alignment, size_t userSize)
 	/*
 	 * If EF_PROTECT_BELOW is set, all addresses returned by malloc()
 	 * and company will be page-aligned.
- 	 */
+	 */
 	if ( !EF_PROTECT_BELOW && alignment > 1 ) {
 		if ( (slack = userSize % alignment) != 0 )
 			userSize += alignment - slack;
@@ -581,7 +617,7 @@ memalign(size_t alignment, size_t userSize)
 	 * inaccessable, so that errant programs won't scrawl on the
 	 * allocator's arena. I'll un-protect it here so that I can make
 	 * a new allocation. I'll re-protect it before I return.
- 	 */
+	 */
 	if ( !noAllocationListProtection )
 		Page_AllowAccess(allocationList, allocationListSize);
 
@@ -592,7 +628,6 @@ memalign(size_t alignment, size_t userSize)
 	if ( !internalUse && unUsedSlots < 7 ) {
 		allocateMoreSlots();
 	}
-	
 	/*
 	 * Iterate through all of the slot structures. Attempt to find a slot
 	 * containing free memory of the exact right size. Accept a slot with
@@ -602,7 +637,7 @@ memalign(size_t alignment, size_t userSize)
 	 * we have to create new memory and mark it as free.
 	 *
 	 */
-	
+
 	for ( slot = allocationList, count = slotCount ; count > 0; count-- ) {
 		if ( slot->mode == FREE
 		 && slot->internalSize >= internalSize ) {
@@ -625,6 +660,7 @@ memalign(size_t alignment, size_t userSize)
 		}
 		slot++;
 	}
+
 	if ( !emptySlots[0] )
 		EF_InternalError("No empty slot 0.");
 
@@ -653,7 +689,7 @@ memalign(size_t alignment, size_t userSize)
 		fullSlot->internalSize = chunkSize;
 		fullSlot->mode = FREE;
 		unUsedSlots--;
-		
+
 		/* Fill the slot if it was specified to do so. */
 		if ( EF_FILL != -1 )
 			memset(
@@ -661,7 +697,6 @@ memalign(size_t alignment, size_t userSize)
 			,EF_FILL
 			,chunkSize);
 	}
-  
 	/*
 	 * If I'm allocating memory for the allocator's own data structures,
 	 * mark it INTERNAL_USE so that no errant software will be able to
@@ -700,7 +735,7 @@ memalign(size_t alignment, size_t userSize)
 				Page_AllowAccess(
 				 fullSlot->internalAddress
 				,internalSize - bytesPerPage);
-			
+
 		address += internalSize - bytesPerPage;
 
 		/* Set up the "dead" page. */
@@ -725,7 +760,7 @@ memalign(size_t alignment, size_t userSize)
 			Page_Delete(address, bytesPerPage);
 		else
 			Page_DenyAccess(address, bytesPerPage);
-			
+
 		address += bytesPerPage;
 
 		/* Set up the "live" page. */
@@ -756,7 +791,7 @@ slotForUserAddress(void * address)
 {
 	register Slot *	slot = allocationList;
 	register size_t	count = slotCount;
-	
+
 	for ( ; count > 0; count-- ) {
 		if ( slot->userAddress == address )
 			return slot;
@@ -774,7 +809,7 @@ slotForInternalAddress(void * address)
 {
 	register Slot *	slot = allocationList;
 	register size_t	count = slotCount;
-	
+
 	for ( ; count > 0; count-- ) {
 		if ( slot->internalAddress == address )
 			return slot;
@@ -793,7 +828,7 @@ slotForInternalAddressPreviousTo(void * address)
 {
 	register Slot *	slot = allocationList;
 	register size_t	count = slotCount;
-	
+
 	for ( ; count > 0; count-- ) {
 		if ( ((char *)slot->internalAddress)
 		 + slot->internalSize == address )
@@ -829,15 +864,19 @@ free(void * address)
 
 	slot = slotForUserAddress(address);
 
-	if ( !slot )
-		EF_Abort("free(%a): address not from malloc().", address);
+	if ( !slot ) {
+		EF_Print("free(%p): address not from malloc().", address);
+		release();
+		g_malloc_dispatch->free(address);
+		return;
+	}
 
 	if ( slot->mode != ALLOCATED ) {
 		if ( internalUse && slot->mode == INTERNAL_USE )
 			/* Do nothing. */;
 		else {
 			EF_Abort(
-			 "free(%a): freeing free memory."
+			 "free(%p): freeing free memory."
 			,address);
 		}
 	}
@@ -850,7 +889,7 @@ free(void * address)
 	/*
 	 * Free memory is _always_ set to deny access. When EF_PROTECT_FREE
 	 * is true, free memory is never reallocated, so it remains access
-	 * denied for the life of the process. When EF_PROTECT_FREE is false, 
+	 * denied for the life of the process. When EF_PROTECT_FREE is false,
 	 * the memory may be re-allocated, at which time access to it will be
 	 * allowed again.
 	 *
@@ -862,9 +901,9 @@ free(void * address)
 	 * released as well.
 	 */
 	if ( EF_PROTECT_FREE )
-	    Page_Delete(slot->internalAddress, slot->internalSize);
+		Page_Delete(slot->internalAddress, slot->internalSize);
 	else
-	    Page_DenyAccess(slot->internalAddress, slot->internalSize);
+		Page_DenyAccess(slot->internalAddress, slot->internalSize);
 
 	previousSlot = slotForInternalAddressPreviousTo(slot->internalAddress);
 	nextSlot = slotForInternalAddress(
@@ -922,12 +961,12 @@ realloc(void * oldBuffer, size_t newSize)
 
 		Page_AllowAccess(allocationList, allocationListSize);
 		noAllocationListProtection = 1;
-		
+
 		slot = slotForUserAddress(oldBuffer);
 
 		if ( slot == 0 )
 			EF_Abort(
-			 "realloc(%a, %d): address not from malloc()."
+			 "realloc(%p, %d): address not from malloc()."
 			,oldBuffer
 			,newSize);
 
@@ -943,7 +982,7 @@ realloc(void * oldBuffer, size_t newSize)
 
 		if ( size < newSize )
 			memset(&(((char *)newBuffer)[size]), 0, newSize - size);
-		
+
 		/* Internal memory was re-protected in free() */
 	}
 
@@ -989,9 +1028,12 @@ calloc(size_t nelem, size_t elsize)
  */
 #if defined(ANDROID) && defined(DYNAMIC_LIB)
 __attribute__((visibility("default")))
-#endif
+extern C_LINKAGE void *
+efence_valloc (size_t size)
+#else
 extern C_LINKAGE void *
 valloc (size_t size)
+#endif
 {
 	return memalign(bytesPerPage, size);
 }
