@@ -1,5 +1,5 @@
 /*
-* 2012-5-31 PIONEER CORPORATION 
+* 2012-5-31 PIONEER CORPORATION
 *
 * Modify this file for ANDROID.
 *
@@ -122,13 +122,14 @@ do_abort()
 	_exit(-1);
 }
 
+#if !defined(ANDROID)
 static void
 printNumber(ef_number number, ef_number base)
 {
 	char		buffer[NUMBER_BUFFER_SIZE];
 	char *		s = &buffer[NUMBER_BUFFER_SIZE];
 	int		size;
-	
+
 	do {
 		ef_number	digit;
 
@@ -149,6 +150,7 @@ printNumber(ef_number number, ef_number base)
 	if ( size > 0 )
 		write(2, s, size);
 }
+#endif
 
 void
 EF_Printv(const char * pattern, va_list args)
@@ -208,7 +210,7 @@ EF_Printv(const char * pattern, va_list args)
 			case 'c':
 				{
 					char	c = va_arg(args, char);
-					
+
 					(void) write(2, &c, 1);
 				}
 				break;
@@ -216,7 +218,7 @@ EF_Printv(const char * pattern, va_list args)
 				{
 					EF_Print(bad_pattern, c);
 				}
-		
+
 			}
 		}
 		else

@@ -1,5 +1,5 @@
 /*
-* 2012-6-5 PIONEER CORPORATION 
+* 2012-6-5 PIONEER CORPORATION
 *
 * This file is copied from bionic/libstdc++/src/new.cpp
 *
