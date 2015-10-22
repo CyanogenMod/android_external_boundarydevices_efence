@@ -560,11 +560,13 @@ efence_posix_memalign(void** memptr, size_t alignment, size_t size) {
 	return g_malloc_dispatch->posix_memalign(memptr, alignment, size);
 }
 
+#if !defined(__LP64__)
 __attribute__((visibility("default")))
 extern C_LINKAGE void*
 efence_pvalloc(size_t bytes) {
   return g_malloc_dispatch->pvalloc(bytes);
 }
+#endif
 
 __attribute__((visibility("default")))
 extern C_LINKAGE void *
